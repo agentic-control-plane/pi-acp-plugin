@@ -1,0 +1,47 @@
+{
+  "name": "@agenticcontrolplane/pi",
+  "version": "0.1.0",
+  "description": "Agentic Control Plane for pi (earendil-works) — check every tool call against your policies before it runs, and keep a durable record of what was allowed and why.",
+  "type": "module",
+  "main": "index.ts",
+  "types": "index.ts",
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "earendil",
+    "agentic-control-plane",
+    "agent-security",
+    "tool-call-policy",
+    "coding-agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/agentic-control-plane/pi-acp-plugin.git"
+  },
+  "homepage": "https://agenticcontrolplane.com/controls/pi",
+  "license": "MIT",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0",
+    "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
