@@ -6,7 +6,9 @@
     "lib": ["ES2023"],
     "types": ["node"],
     "strict": true,
-    "noEmit": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": ".",
     "skipLibCheck": true,
     "esModuleInterop": true,
     "verbatimModuleSyntax": true

@@ -115,6 +115,7 @@ Then `pi --model acp/gemini-3.5-flash`. The proxy is multi-provider (routes `gpt
 ```sh
 npm test        # 16 tests: decision mapping, fail posture, empty chair, receipt
 npm run typecheck
+npm run build   # emits dist/ (JS + .d.ts); prepack runs this from clean
 ```
 
 MIT
