@@ -1,6 +1,6 @@
 {
   "name": "@agenticcontrolplane/pi",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Agentic Control Plane for pi (earendil-works) — check every tool call against your policies before it runs, and keep a durable record of what was allowed and why.",
   "type": "module",
   "main": "./dist/index.js",

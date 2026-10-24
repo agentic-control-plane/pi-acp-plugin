@@ -33,11 +33,11 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const PLUGIN_VERSION = "0.1.1";
+export const PLUGIN_VERSION = "0.1.2";
 
 /** 200 KB ceiling on tool output sent for post-hoc scanning (matches the backend). */
 const POST_HOOK_PAYLOAD_CEILING = 200 * 1024;
@@ -110,6 +110,43 @@ function lapseLine(fields: Record<string, unknown>): void {
     );
   } catch {
     /* the lapse log is best-effort — never block a call on it */
+  }
+}
+
+export const KEY_REJECTED_FIX =
+  "Fix: re-run the installer (curl -sf https://agenticcontrolplane.com/install.sh | bash) or create a key at https://cloud.agenticcontrolplane.com/settings/api-keys and save it: echo 'gsk_...' > ~/.acp/credentials";
+export const WORKSPACE_DELETED_FIX =
+  "The ACP workspace this machine was connected to has been deleted. To remove ACP from this machine: acp-uninstall (older installs without it: curl -sf https://agenticcontrolplane.com/uninstall.sh | bash). To keep using ACP, re-run the installer: curl -sf https://agenticcontrolplane.com/install.sh | bash";
+
+const DELETED_NOTICE_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * True the first time the workspace-deleted notice is asked for in a session,
+ * false after (marker ~/.acp/notices/workspace-deleted.<session>, created with
+ * the `wx` flag). With no session id, at most once per 24h via a timestamp
+ * marker. Fails toward showing: an unwritable marker repeats, never vanishes.
+ */
+export function firstDeletedNotice(sessionId: string | undefined, now = Date.now()): boolean {
+  const dir = join(homedir(), ".acp", "notices");
+  const id = String(sessionId ?? "").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 120);
+  try {
+    mkdirSync(dir, { recursive: true });
+    if (!id || id === "unknown") {
+      const marker = join(dir, "workspace-deleted.no-session");
+      let last = 0;
+      try {
+        last = Date.parse(readFileSync(marker, "utf8").trim()) || 0;
+      } catch {
+        /* absent */
+      }
+      if (now - last < DELETED_NOTICE_WINDOW_MS) return false;
+      writeFileSync(marker, new Date(now).toISOString());
+      return true;
+    }
+    writeFileSync(join(dir, `workspace-deleted.${id}`), new Date(now).toISOString(), { flag: "wx" });
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code !== "EEXIST";
   }
 }
 
@@ -231,8 +268,14 @@ export default function acp(pi: ExtensionAPI): void {
         // deepen the rate limit it is reporting.
         const err = new Error(`HTTP ${res.status}${res.statusText ? ` ${res.statusText}` : ""}`) as Error & {
           httpStatus?: number;
+          code?: string;
         };
         err.httpStatus = res.status;
+        // A 4xx body may carry a machine-readable `code` (e.g. "workspace_deleted").
+        if (res.status >= 400 && res.status < 500) {
+          const body = (await res.json().catch(() => null)) as { code?: unknown } | null;
+          if (typeof body?.code === "string") err.code = body.code;
+        }
         throw err;
       }
       return (await res.json()) as T;
@@ -260,6 +303,37 @@ export default function acp(pi: ExtensionAPI): void {
     };
   }
 
+  // A 401/403 is NOT the gateway being down — it is this machine's key being
+  // revoked, mistyped, or from a deleted workspace. Reading it as "gateway
+  // unreachable" left a user running ungoverned for hours believing it was our
+  // outage. Same posture as an outage (attended fails open, unattended stays
+  // blocked), but the message names the cause and the fix. A 401 with
+  // `code: "workspace_deleted"` says once per session how to remove ACP, then
+  // proceeds silently. (gatewaystack-connect#1693, from claude-code-acp-plugin 0.29.3.)
+  function keyRejected(
+    ctx: ExtensionContext,
+    toolName: string,
+    status: number,
+    code: string | undefined,
+  ): { block: true; reason: string } | undefined {
+    const deleted = code === "workspace_deleted";
+    const fix = deleted ? WORKSPACE_DELETED_FIX : KEY_REJECTED_FIX;
+    if (ctx.hasUI) {
+      lapseLine({ kind: "UNGOVERNED", tool: toolName, tier: tierOf(ctx), detail: `key rejected (HTTP ${status})` });
+      if (deleted && !firstDeletedNotice(sidOf(ctx))) return undefined;
+      tell(
+        ctx,
+        `[ACP] ⚠ KEY REJECTED (HTTP ${status}): the key in ~/.acp/credentials is revoked or invalid — this call proceeded UNGOVERNED and unlogged, and every call will until it is fixed. ${fix}`,
+        "warning",
+      );
+      return undefined;
+    }
+    return {
+      block: true,
+      reason: `[ACP] Key rejected (HTTP ${status}) — the key in ~/.acp/credentials is revoked or invalid; ${tierOf(ctx)} tier stays blocked until it is fixed. ${fix}`,
+    };
+  }
+
   // --- Pre-call policy check: the decision happens before the tool runs. ---
   pi.on("tool_call", async (event, ctx) => {
     const payload = () => checkPayload(ctx, event.toolName, event.input, event.toolCallId, "PreToolUse");
@@ -279,7 +353,10 @@ export default function acp(pi: ExtensionAPI): void {
         data = await post<Decision>("/govern/tool-use", payload(), ctx.signal);
       }
     } catch (error) {
-      const err = error as Error | undefined;
+      const err = error as (Error & { httpStatus?: number; code?: string }) | undefined;
+      if (err?.httpStatus === 401 || err?.httpStatus === 403) {
+        return keyRejected(ctx, event.toolName, err.httpStatus, err.code);
+      }
       const detail = err?.name === "AbortError" ? "request timed out" : (err?.message ?? "network error");
       if (ctx.hasUI) {
         // Attended: lapse loudly and leave the audit trail ACP never saw.
