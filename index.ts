@@ -292,7 +292,7 @@ export default function acp(pi: ExtensionAPI): void {
     toolCallId: string,
     event: string,
   ): Record<string, unknown> {
-    return {
+    const body: Record<string, unknown> = {
       tool_name: toolName,
       tool_input: input,
       session_id: sidOf(ctx),
@@ -301,6 +301,17 @@ export default function acp(pi: ExtensionAPI): void {
       hook_event_name: event,
       agent_tier: tierOf(ctx),
     };
+    // gatewaystack-connect#1518: the attended claim and native_ask capability
+    // ride PreToolUse only. The claim is read from the runtime signal itself
+    // (NEVER from ACP_AGENT_TIER, which is an override and can say anything);
+    // claim:false is a positive "nobody will see a dialog". native_ask is
+    // honest: on "ask" this adapter renders ctx.ui.confirm and blocks until
+    // answered, and denies when there is no UI.
+    if (event === "PreToolUse") {
+      body.attended = { claim: ctx.hasUI === true, source: "hasUI" };
+      body.capabilities = ["native_ask"];
+    }
+    return body;
   }
 
   // A 401/403 is NOT the gateway being down — it is this machine's key being
