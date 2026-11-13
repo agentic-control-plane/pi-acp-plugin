@@ -37,7 +37,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const PLUGIN_VERSION = "0.1.2";
+export const PLUGIN_VERSION = "0.1.3";
 
 /** 200 KB ceiling on tool output sent for post-hoc scanning (matches the backend). */
 const POST_HOOK_PAYLOAD_CEILING = 200 * 1024;
@@ -404,18 +404,19 @@ export default function acp(pi: ExtensionAPI): void {
           reason: `[ACP] Approval required but no operator is present (${reason}) — denied. An unattended agent cannot self-approve; review it at ${CONSOLE_BASE}.`,
         };
       }
-      let approved = false;
-      try {
-        approved = await ctx.ui.confirm(
-          "[ACP] Approval required",
-          `${reason}\n\n${event.toolName}: ${summarizeInput(event.input)}\n\nAllow this call?`,
-        );
-      } catch {
-        // If the prompt itself fails, treat it as no-answer → deny.
-        approved = false;
-      }
-      if (!approved) {
-        return { block: true, reason: `[ACP] Denied at approval prompt: ${reason}` };
+      const answer = await promptApproval(ctx, reason, event.toolName, event.input);
+      if (answer !== "approved") {
+        // The human's "no" (or no answer in time) is the gateway's answer too:
+        // the held approval expires server-side (HARNESS_ASK_TTL) and the
+        // model is told not to retry the same command (same steer as the
+        // Claude Code plugin). gatewaystack-connect#1902: never a hang.
+        const why = answer === "timed-out"
+          ? `nobody answered the prompt within ${Math.round(askTimeoutMs() / 60_000)} min`
+          : "the operator said no";
+        return {
+          block: true,
+          reason: `[ACP] Denied at approval prompt (${why}): ${reason} — do not retry the same command; do something else or ask the operator.`,
+        };
       }
       return undefined;
     }
@@ -472,6 +473,62 @@ export default function acp(pi: ExtensionAPI): void {
     }
     return undefined;
   });
+}
+
+/** Lead-in the gateway puts on line 1 of a native-ask reason (gateway
+ *  govern/harnessAsk.ts ACP_ASK_PREFIX). When present, the reason is already
+ *  the whole human-facing text — action, agent's description, command, rule —
+ *  so the prompt shows it verbatim instead of repeating the command. */
+export const ACP_ASK_PREFIX = "ACP (Agentic Control Plane) asks: ";
+
+/** Longest a prompt may stay open before "no answer" is read as "no". Matches
+ *  the gateway's HARNESS_ASK_TTL_SECONDS (600): after that the held approval
+ *  has expired server-side, so a late yes could not be honoured anyway.
+ *  ACP_ASK_TIMEOUT_MS only shortens it in practice (tests); 0 or garbage falls
+ *  back to the default. */
+export const DEFAULT_ASK_TIMEOUT_MS = 600_000;
+export function askTimeoutMs(): number {
+  const n = Number(process.env.ACP_ASK_TIMEOUT_MS);
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ASK_TIMEOUT_MS;
+}
+
+/** Title + body for ctx.ui.confirm. A gateway-branded reason is shown as-is
+ *  (its first line is the title); anything else gets the tool and its input. */
+export function askPrompt(reason: string, toolName: string, input: unknown): { title: string; body: string } {
+  if (reason.startsWith(ACP_ASK_PREFIX)) {
+    const [first, ...rest] = reason.split("\n");
+    return {
+      title: first,
+      body: `${rest.map((l) => l.trim()).filter(Boolean).join("\n")}\n\nAllow this call?`.trimStart(),
+    };
+  }
+  return {
+    title: "[ACP] Approval required",
+    body: `${reason}\n\n${toolName}: ${summarizeInput(input)}\n\nAllow this call?`,
+  };
+}
+
+export type AskAnswer = "approved" | "declined" | "timed-out";
+
+/** Put the ask in front of the human and wait, but never forever: a prompt
+ *  that is not answered within askTimeoutMs() — an RPC host that never
+ *  replies, a TUI left unattended — resolves as "timed-out" and the caller
+ *  denies. A prompt that throws is a "declined". */
+async function promptApproval(ctx: ExtensionContext, reason: string, toolName: string, input: unknown): Promise<AskAnswer> {
+  const { title, body } = askPrompt(reason, toolName, input);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<AskAnswer>((resolve) => {
+    timer = setTimeout(() => resolve("timed-out"), askTimeoutMs());
+  });
+  try {
+    const confirmed = ctx.ui.confirm(title, body).then(
+      (ok): AskAnswer => (ok ? "approved" : "declined"),
+      (): AskAnswer => "declined",
+    );
+    return await Promise.race([confirmed, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /** Compact one-line view of tool input for the approval prompt. */
