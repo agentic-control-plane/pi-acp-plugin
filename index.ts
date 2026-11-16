@@ -37,7 +37,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const PLUGIN_VERSION = "0.1.2";
+export const PLUGIN_VERSION = "0.1.3";
 
 /** 200 KB ceiling on tool output sent for post-hoc scanning (matches the backend). */
 const POST_HOOK_PAYLOAD_CEILING = 200 * 1024;
@@ -56,7 +56,14 @@ interface Decision {
 interface OutputVerdict {
   action?: "pass" | "block" | "redact";
   reason?: string;
+  /** Redacted text, current gateways when `output_rewrite` was declared. */
+  modified_tool_response?: unknown;
+  /** Redacted text, legacy field. */
+  modified_output?: string;
+  /** Oldest gateways echoed the rewrite here. */
   tool_output?: string;
+  pii?: { types?: string[]; count?: number; action?: string; applied?: boolean };
+  /** One human line written by the gateway; printed verbatim. */
   notice?: string;
 }
 
@@ -428,15 +435,21 @@ export default function acp(pi: ExtensionAPI): void {
   // becomes corrective feedback, a redact rewrites what the model reads. ---
   pi.on("tool_result", async (event, ctx) => {
     let outputStr = "";
+    // Declare `output_rewrite` only when a text-only rewrite loses nothing:
+    // every block is text and the scan covered the whole output. Otherwise
+    // the gateway records "detected" and we must not rewrite.
+    let canRewrite = false;
     try {
+      canRewrite = Array.isArray(event.content) && event.content.every((block) => block?.type === "text");
       outputStr = event.content
         .map((block) => (block.type === "text" ? block.text : `[${block.type} content]`))
         .join("\n");
+      if (Buffer.byteLength(outputStr, "utf8") > POST_HOOK_PAYLOAD_CEILING) {
+        outputStr = outputStr.slice(0, POST_HOOK_PAYLOAD_CEILING);
+        canRewrite = false;
+      }
     } catch {
       return undefined;
-    }
-    if (Buffer.byteLength(outputStr, "utf8") > POST_HOOK_PAYLOAD_CEILING) {
-      outputStr = outputStr.slice(0, POST_HOOK_PAYLOAD_CEILING);
     }
 
     let data: OutputVerdict;
@@ -446,6 +459,7 @@ export default function acp(pi: ExtensionAPI): void {
         {
           ...checkPayload(ctx, event.toolName, event.input, event.toolCallId, "PostToolUse"),
           tool_output: outputStr,
+          ...(canRewrite ? { capabilities: ["output_rewrite"] } : {}),
         },
         ctx.signal,
       );
@@ -455,20 +469,41 @@ export default function acp(pi: ExtensionAPI): void {
       return undefined;
     }
 
-    if (data.action === "block") {
-      return {
-        content: [{ type: "text" as const, text: `[ACP] Blocked: ${data.reason ?? "policy"}` }],
-        isError: true,
-      };
-    }
-    if (data.action === "redact" && typeof data.tool_output === "string") {
-      // DLP / ad-block rewrite: the model sees the transformed output.
-      return { content: [{ type: "text" as const, text: data.tool_output }] };
-    }
-    if (typeof data.notice === "string" && data.notice.trim() && !shadowOff()) {
-      // Shadow-mode counterfactual (#607): advisory, arrives with action "pass".
-      bump(ctx, "notices");
-      tell(ctx, data.notice, "info");
+    try {
+      const notice = typeof data?.notice === "string" && data.notice.trim() ? data.notice : undefined;
+      const isPii = data?.pii != null;
+
+      if (data?.action === "block") {
+        if (notice) tell(ctx, notice, "info");
+        return {
+          content: [{ type: "text" as const, text: `[ACP] Blocked: ${data.reason ?? "policy"}` }],
+          isError: true,
+        };
+      }
+      if (data?.action === "redact") {
+        if (notice) tell(ctx, notice, "info");
+        const replacement =
+          typeof data.modified_tool_response === "string"
+            ? data.modified_tool_response
+            : typeof data.modified_output === "string"
+              ? data.modified_output
+              : data.tool_output;
+        // DLP / ad-block rewrite: the model sees the transformed output. Only
+        // when we declared the capability; otherwise the gateway recorded
+        // "detected" and the original passes through to match that record.
+        if (canRewrite && typeof replacement === "string") {
+          return { content: [{ type: "text" as const, text: replacement }] };
+        }
+        return undefined;
+      }
+      if (notice && (isPii || !shadowOff())) {
+        // PII notices always print; shadow-mode counterfactuals (#607) are
+        // advisory, arrive with action "pass", and honour ACP_SHADOW=off.
+        if (!isPii) bump(ctx, "notices");
+        tell(ctx, notice, "info");
+      }
+    } catch {
+      // Fail open: anything unexpected passes the original output through.
     }
     return undefined;
   });
