@@ -166,6 +166,129 @@ test("tool_result redact rewrites what the model reads", async () => {
   server.close();
 });
 
+// Fake but realistic address, assembled so no literal sits in the fixture.
+const EMAIL = "dana" + "@northwind-mail.net";
+const PII_NOTICE = "[ACP] Removed PII before the agent saw it: email.";
+const PII = { types: ["email"], count: 1, action: "redacted", applied: true };
+
+/** Mount against a stub that answers tool-output with `verdict`; records the post body. */
+async function postScenario(verdict: any, status = 200) {
+  const seen: any[] = [];
+  const { server, base } = await stubGateway((url, body) => {
+    if (url.includes("tool-output")) {
+      seen.push(body);
+      return { status, json: verdict };
+    }
+    return { json: { decision: "allow" } };
+  });
+  return { seen, server, handlers: mount(base) };
+}
+
+const textResult = (text: string) => ({
+  type: "tool_result",
+  toolName: "read",
+  toolCallId: "c1",
+  input: {},
+  content: [{ type: "text", text }],
+  isError: false,
+});
+
+test("redact via modified_tool_response: declares output_rewrite, model gets redacted text", async () => {
+  const { seen, server, handlers } = await postScenario({
+    action: "redact",
+    modified_tool_response: "contact: [EMAIL]",
+    pii: PII,
+  });
+  const result = await handlers.tool_result(textResult(`contact: ${EMAIL}`), fakeCtx());
+  assert.deepEqual(seen[0].capabilities, ["output_rewrite"]);
+  assert.equal(seen[0].tool_output, `contact: ${EMAIL}`);
+  assert.equal(seen[0].tool_response, undefined, "no tool_response is sent");
+  assert.deepEqual(result.content, [{ type: "text", text: "contact: [EMAIL]" }]);
+  server.close();
+});
+
+test("redact via legacy modified_output: model gets redacted text", async () => {
+  const { server, handlers } = await postScenario({ action: "redact", modified_output: "contact: [EMAIL]", pii: PII });
+  const result = await handlers.tool_result(textResult(`contact: ${EMAIL}`), fakeCtx());
+  assert.deepEqual(result.content, [{ type: "text", text: "contact: [EMAIL]" }]);
+  server.close();
+});
+
+test("non-text block: no capability declared, no rewrite", async () => {
+  const { seen, server, handlers } = await postScenario({
+    action: "redact",
+    modified_output: "contact: [EMAIL]",
+    pii: { ...PII, action: "detected", applied: false },
+  });
+  const event = {
+    ...textResult(`contact: ${EMAIL}`),
+    content: [
+      { type: "text", text: `contact: ${EMAIL}` },
+      { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+    ],
+  };
+  const result = await handlers.tool_result(event, fakeCtx());
+  assert.equal(seen[0].capabilities, undefined);
+  assert.equal(result, undefined, "original (with image) passes through");
+  server.close();
+});
+
+test("truncated output: no capability declared, no rewrite", async () => {
+  const { seen, server, handlers } = await postScenario({ action: "redact", modified_output: "x" });
+  const big = `${EMAIL} ` + "a".repeat(201 * 1024);
+  const result = await handlers.tool_result(textResult(big), fakeCtx());
+  assert.equal(seen[0].capabilities, undefined);
+  assert.equal(result, undefined);
+  server.close();
+});
+
+test("PII notice prints verbatim on redact, even with ACP_SHADOW=off", async () => {
+  process.env.ACP_SHADOW = "off";
+  try {
+    const { server, handlers } = await postScenario({
+      action: "redact",
+      modified_tool_response: "contact: [EMAIL]",
+      pii: PII,
+      notice: PII_NOTICE,
+    });
+    const ctx = fakeCtx();
+    await handlers.tool_result(textResult(`contact: ${EMAIL}`), ctx);
+    assert.deepEqual(ctx.notes, [{ msg: PII_NOTICE, level: "info" }]);
+    server.close();
+  } finally {
+    delete process.env.ACP_SHADOW;
+  }
+});
+
+test("notice prints on block too", async () => {
+  const { server, handlers } = await postScenario({ action: "block", reason: "pii", pii: PII, notice: PII_NOTICE });
+  const ctx = fakeCtx();
+  const result = await handlers.tool_result(textResult(`contact: ${EMAIL}`), ctx);
+  assert.equal(result.isError, true);
+  assert.ok(ctx.notes.some((n) => n.msg === PII_NOTICE));
+  server.close();
+});
+
+test("shadow notice on pass is still silenced by ACP_SHADOW=off", async () => {
+  process.env.ACP_SHADOW = "off";
+  try {
+    const { server, handlers } = await postScenario({ action: "pass", notice: "[ACP] shadow: would have asked" });
+    const ctx = fakeCtx();
+    await handlers.tool_result(textResult("ok"), ctx);
+    assert.equal(ctx.notes.length, 0);
+    server.close();
+  } finally {
+    delete process.env.ACP_SHADOW;
+  }
+});
+
+test("gateway error on tool-output: original passes through", async () => {
+  const { server, handlers } = await postScenario({ error: "boom" }, 500);
+  const result = await handlers.tool_result(textResult(`contact: ${EMAIL}`), fakeCtx());
+  assert.equal(result, undefined);
+  server.close();
+});
+
 test("tool_result unreachable passes through silently (observability only)", async () => {
   process.env.ACP_BEARER_TOKEN = "gsk_test_token";
   process.env.ACP_GOVERN_BASE = "http://127.0.0.1:1";
