@@ -14,10 +14,10 @@
  * Decision mapping onto pi's ToolCallEventResult:
  *   allow -> return undefined (the call proceeds)
  *   deny  -> { block: true, reason }
- *   ask   -> attended (ctx.hasUI): prompt via ctx.ui.confirm; approve -> proceed,
- *            decline -> block. Unattended (!ctx.hasUI, i.e. print/json mode):
- *            block — an agent with nobody watching cannot self-approve. That is
- *            the empty-chair posture, and pi's ctx.hasUI states it exactly.
+ *   ask   -> attended (the TUI: ctx.hasUI and ctx.mode "tui"): prompt via
+ *            ctx.ui.confirm; approve -> proceed, decline -> block. Otherwise
+ *            (print/json, or RPC, whose host may answer the confirm itself):
+ *            block — an agent with nobody watching cannot self-approve.
  *
  * Unreachability posture (never-brick): attended
  * sessions fail OPEN with a loud UNGOVERNED warning and a ~/.acp/lapse.log
@@ -315,7 +315,7 @@ export default function acp(pi: ExtensionAPI): void {
     // honest: on "ask" this adapter renders ctx.ui.confirm and blocks until
     // answered, and denies when there is no UI.
     if (event === "PreToolUse") {
-      body.attended = { claim: ctx.hasUI === true, source: "hasUI" };
+      body.attended = attendedOf(ctx);
       body.capabilities = ["native_ask"];
     }
     return body;
@@ -403,7 +403,7 @@ export default function acp(pi: ExtensionAPI): void {
     if (data.decision === "ask") {
       bump(ctx, "asked");
       const reason = data.reason ?? "approval required";
-      if (!ctx.hasUI) {
+      if (!humanAtPrompt(ctx)) {
         // Empty chair: nobody can answer, so the ask is a deny. pi states the
         // condition exactly via ctx.hasUI — no timeout guesswork.
         return {
@@ -418,7 +418,9 @@ export default function acp(pi: ExtensionAPI): void {
         // model is told not to retry the same command (same steer as the
         // Claude Code plugin). Never a hang.
         const why = answer === "timed-out"
-          ? `nobody answered the prompt within ${Math.round(askTimeoutMs() / 60_000)} min`
+          ? `nobody answered the prompt within ${formatWait(askTimeoutMs())}`
+          : answer === "aborted"
+          ? "the turn was cancelled before anyone answered"
           : "the operator said no";
         return {
           block: true,
@@ -519,12 +521,35 @@ export const ACP_ASK_PREFIX = "ACP (Agentic Control Plane) asks: ";
 /** Longest a prompt may stay open before "no answer" is read as "no". Matches
  *  the gateway's HARNESS_ASK_TTL_SECONDS (600): after that the held approval
  *  has expired server-side, so a late yes could not be honoured anyway.
- *  ACP_ASK_TIMEOUT_MS only shortens it in practice (tests); 0 or garbage falls
- *  back to the default. */
+ *  ACP_ASK_TIMEOUT_MS can only shorten it (tests): a longer value is clamped,
+ *  because a yes after the server-side hold expired would run a call the audit
+ *  trail says expired. 0 or garbage falls back to the default. */
 export const DEFAULT_ASK_TIMEOUT_MS = 600_000;
 export function askTimeoutMs(): number {
   const n = Number(process.env.ACP_ASK_TIMEOUT_MS);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ASK_TIMEOUT_MS;
+  return Number.isFinite(n) && n > 0 ? Math.min(n, DEFAULT_ASK_TIMEOUT_MS) : DEFAULT_ASK_TIMEOUT_MS;
+}
+
+/** "10 min", "45 s": never "0 min" for a short timeout. */
+export function formatWait(ms: number): string {
+  return ms >= 60_000 ? `${Math.round(ms / 60_000)} min` : `${Math.max(1, Math.round(ms / 1000))} s`;
+}
+
+/** The attended claim sent to the gateway. pi reports hasUI true in RPC mode,
+ *  where "the UI" is whatever program drives stdin and may answer every
+ *  confirm itself, so only the TUI counts as a person at the prompt. A pi too
+ *  old to report its mode keeps the hasUI claim under a different source name,
+ *  which the gateway does not treat as verified. */
+export function attendedOf(ctx: ExtensionContext): { claim: boolean; source: string } {
+  const mode = (ctx as { mode?: unknown }).mode;
+  if (mode === undefined) return { claim: ctx.hasUI === true, source: "hasUI:nomode" };
+  return { claim: ctx.hasUI === true && mode === "tui", source: "hasUI" };
+}
+
+/** Whether an ask may be put in front of a person here (TUI with a known mode). */
+export function humanAtPrompt(ctx: ExtensionContext): boolean {
+  const a = attendedOf(ctx);
+  return a.claim && a.source === "hasUI";
 }
 
 /** Title + body for ctx.ui.confirm. A gateway-branded reason is shown as-is
@@ -543,7 +568,7 @@ export function askPrompt(reason: string, toolName: string, input: unknown): { t
   };
 }
 
-export type AskAnswer = "approved" | "declined" | "timed-out";
+export type AskAnswer = "approved" | "declined" | "timed-out" | "aborted";
 
 /** Put the ask in front of the human and wait, but never forever: a prompt
  *  that is not answered within askTimeoutMs() — an RPC host that never
@@ -556,19 +581,30 @@ async function promptApproval(ctx: ExtensionContext, reason: string, toolName: s
   // `timeout` / `signal`, so a denied-by-timeout prompt never lingers on
   // screen inviting a "yes" that can no longer count. The race below stays
   // as the backstop for hosts that ignore the options.
+  // A cancelled turn (ctx.signal) closes the dialog too, and reads as a no.
   const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onTurnAbort: (() => void) | undefined;
   const timeout = new Promise<AskAnswer>((resolve) => {
     timer = setTimeout(() => { abort.abort(); resolve("timed-out"); }, ms);
   });
+  const turnAborted = new Promise<AskAnswer>((resolve) => {
+    const turn = ctx.signal;
+    if (!turn) return;
+    onTurnAbort = () => { abort.abort(); resolve("aborted"); };
+    if (turn.aborted) onTurnAbort();
+    else turn.addEventListener("abort", onTurnAbort, { once: true });
+  });
   try {
+    if (abort.signal.aborted) return "aborted";
     const confirmed = ctx.ui.confirm(title, body, { timeout: ms, signal: abort.signal }).then(
       (ok): AskAnswer => (ok ? "approved" : "declined"),
       (): AskAnswer => "declined",
     );
-    return await Promise.race([confirmed, timeout]);
+    return await Promise.race([confirmed, timeout, turnAborted]);
   } finally {
     if (timer) clearTimeout(timer);
+    if (onTurnAbort) ctx.signal?.removeEventListener("abort", onTurnAbort);
   }
 }
 

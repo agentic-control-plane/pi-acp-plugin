@@ -1,6 +1,6 @@
 // A 401/403 from the gateway is a credential failure, not an outage, and a 401
 // with `code: "workspace_deleted"` says so once per session
-// (gatewaystack-connect#1693; mirrors claude-code-acp-plugin
+// (internal tracker; mirrors claude-code-acp-plugin
 // test/workspace-deleted-notice.test.mjs + test/429-is-a-verdict.test.mjs).
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
