@@ -1,9 +1,9 @@
-// ACP plugin conformance adapter for pi-acp-plugin (gatewaystack-connect#1344,
-// step 1). Drives the REAL plugin entry point (imported from ../index.ts, not
-// reimplemented) against a fake gateway, using the shared corpus vendored at
+// ACP plugin conformance adapter for pi-acp-plugin (internal tracker). Drives
+// the REAL plugin entry point (imported from ../index.ts, not reimplemented)
+// against a fake gateway, using the shared corpus vendored at
 // test/fixtures/plugin-corpus.json. See that corpus's own "purpose" field for
 // the seam this closes: unit tests stayed green while four plugins dropped
-// every gateway notice (#1334).
+// every gateway notice.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
@@ -29,8 +29,8 @@ test("vendored corpus matches the pinned fingerprint", () => {
   assert.equal(
     actualFingerprint,
     PINNED_FINGERPRINT,
-    "test/fixtures/plugin-corpus.json has drifted from the canonical copy at " +
-      "gatewaystack-connect:conformance/plugin-corpus.json — re-copy it with `cp` " +
+    "test/fixtures/plugin-corpus.json has drifted from the canonical corpus " +
+      "copy — re-copy it with `cp` " +
       "(never retype) and update PINNED_FINGERPRINT in the same change.",
   );
 });
@@ -104,6 +104,7 @@ function fakeCtx(opts: { hasUI: boolean; sessionId?: string }) {
   return {
     notes,
     hasUI: opts.hasUI,
+    mode: opts.hasUI ? "tui" : "print",
     cwd: "/tmp",
     signal: new AbortController().signal,
     sessionManager: { getSessionId: () => opts.sessionId ?? "acpconf-session-0001" },

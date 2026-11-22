@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import acp from "../index.ts";
 
-function ctxOf(hasUI: boolean) {
+/** `mode: null` builds a ctx with no mode field at all (a pi too old to report it). */
+function ctxOf(hasUI: boolean, mode: string | null = hasUI ? "tui" : "print") {
   return {
     hasUI,
+    ...(mode === null ? {} : { mode }),
     cwd: "/tmp",
     signal: new AbortController().signal,
     sessionManager: { getSessionId: () => "sess-att" },
@@ -53,6 +55,23 @@ test("PreToolUse: hasUI false -> attended claim false (positive no-dialog)", asy
   await handlers.tool_call(CALL, ctxOf(false));
   assert.deepEqual(bodies[0].attended, { claim: false, source: "hasUI" });
   server.close();
+});
+
+test("RPC mode never claims attended: the host may answer the confirm itself", async () => {
+  const { handlers, bodies, server } = await setup();
+  await handlers.tool_call(CALL, ctxOf(true, "rpc"));
+  assert.deepEqual(bodies[0].attended, { claim: false, source: "hasUI" });
+  server.close();
+});
+
+test("a pi that does not report its mode uses a source name the gateway does not verify", async () => {
+  const { handlers, bodies, server } = await setup();
+  try {
+    await handlers.tool_call(CALL, ctxOf(true, null));
+    assert.deepEqual(bodies[0].attended, { claim: true, source: "hasUI:nomode" });
+  } finally {
+    server.close();
+  }
 });
 
 test("claim comes from ctx.hasUI, never from ACP_AGENT_TIER", async () => {

@@ -1,4 +1,4 @@
-// Session-receipt contract (gatewaystack-connect#606): one honest line at
+// Session-receipt contract (internal tracker): one honest line at
 // session end, or nothing at all when zero calls were governed.
 import { test } from "node:test";
 import assert from "node:assert/strict";

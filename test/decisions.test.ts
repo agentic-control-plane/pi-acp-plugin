@@ -1,5 +1,5 @@
 // Decision mapping + fail posture for the pi extension.
-// gatewaystack-connect#385: attended (ctx.hasUI) fails open LOUDLY, unattended
+// Attended (ctx.hasUI) fails open LOUDLY, unattended
 // fails closed; policy denies unaffected. Empty-chair: ask with no UI -> deny.
 import { test } from "node:test";
 import assert from "node:assert/strict";

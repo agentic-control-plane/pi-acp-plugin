@@ -5,7 +5,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import acp, { ACP_ASK_PREFIX, DEFAULT_ASK_TIMEOUT_MS, askPrompt, askTimeoutMs } from "../index.ts";
+import acp, { ACP_ASK_PREFIX, DEFAULT_ASK_TIMEOUT_MS, askPrompt, askTimeoutMs, formatWait } from "../index.ts";
 
 const GATEWAY_REASON = `${ACP_ASK_PREFIX}Force-push main to origin\n  agent says: "rewrite history"\n  git push --force origin main · destructive floor · yes = run once`;
 
@@ -29,11 +29,13 @@ async function stubGateway(reason: string) {
   return { handlers, server };
 }
 
-function ctxWith(confirm: (title: string, body: string) => Promise<boolean>) {
+function ctxWith(confirm: (title: string, body: string) => Promise<boolean>, extra: Record<string, unknown> = {}) {
   return {
     hasUI: true,
+    mode: "tui",
     cwd: "/tmp",
     signal: new AbortController().signal,
+    ...extra,
     sessionManager: { getSessionId: () => "sess-ask" },
     ui: { notify: () => {}, confirm },
   };
@@ -101,5 +103,47 @@ test("ask timeout defaults to the gateway's 600s TTL; garbage or zero falls back
   }
   process.env.ACP_ASK_TIMEOUT_MS = "1500";
   assert.equal(askTimeoutMs(), 1500);
+  process.env.ACP_ASK_TIMEOUT_MS = "3600000";
+  assert.equal(askTimeoutMs(), DEFAULT_ASK_TIMEOUT_MS, "a longer timeout is clamped to the gateway TTL");
   delete process.env.ACP_ASK_TIMEOUT_MS;
+});
+
+test("sub-minute waits read in seconds, never '0 min'", () => {
+  assert.equal(formatWait(50), "1 s");
+  assert.equal(formatWait(45_000), "45 s");
+  assert.equal(formatWait(600_000), "10 min");
+});
+
+test("an ask in RPC mode is denied without a prompt", async () => {
+  const { handlers, server } = await stubGateway("needs review");
+  try {
+    let prompted = false;
+    const decision = await handlers.tool_call(CALL, ctxWith(async () => { prompted = true; return true; }, { mode: "rpc" }));
+    assert.equal(prompted, false, "no confirm sent to an RPC host");
+    assert.equal(decision.block, true);
+    assert.match(decision.reason, /no operator is present/);
+  } finally {
+    server.close();
+  }
+});
+
+test("cancelling the turn closes the prompt and denies", async () => {
+  const { handlers, server } = await stubGateway("needs review");
+  try {
+    const turn = new AbortController();
+    let dialogSignal: AbortSignal | undefined;
+    const confirm = (_t: string, _b: string, opts?: { signal?: AbortSignal }) => {
+      dialogSignal = opts?.signal;
+      setTimeout(() => turn.abort(), 10);
+      return new Promise<boolean>(() => {});
+    };
+    const started = Date.now();
+    const decision = await handlers.tool_call(CALL, ctxWith(confirm as any, { signal: turn.signal }));
+    assert.ok(Date.now() - started < 5_000, "resolved by the abort, not the 10 min timeout");
+    assert.equal(decision.block, true);
+    assert.match(decision.reason, /turn was cancelled/);
+    assert.equal(dialogSignal?.aborted, true, "the dialog was told to close");
+  } finally {
+    server.close();
+  }
 });
