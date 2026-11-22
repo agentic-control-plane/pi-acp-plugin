@@ -19,11 +19,11 @@
  *            block — an agent with nobody watching cannot self-approve. That is
  *            the empty-chair posture, and pi's ctx.hasUI states it exactly.
  *
- * Unreachability posture (gatewaystack-connect#385, never-brick): attended
+ * Unreachability posture (never-brick): attended
  * sessions fail OPEN with a loud UNGOVERNED warning and a ~/.acp/lapse.log
  * entry; unattended runs fail CLOSED — nobody is watching, so the block is the
  * safety net. Policy denies are unaffected; this posture only covers the
- * inability to ASK the policy (gatewaystack-connect#690: one transport retry
+ * inability to ASK the policy (one transport retry
  * before the fail posture, because the slow answers are cold starts).
  *
  * Dependency-free: the only import is a type (erased at runtime), so this file
@@ -37,7 +37,7 @@ import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const PLUGIN_VERSION = "0.1.3";
+export const PLUGIN_VERSION = "0.1.4";
 
 /** 200 KB ceiling on tool output sent for post-hoc scanning (matches the backend). */
 const POST_HOOK_PAYLOAD_CEILING = 200 * 1024;
@@ -75,7 +75,7 @@ interface SessionStats {
 }
 
 /**
- * Session-receipt contract (gatewaystack-connect#606, same one line as the
+ * Session-receipt contract (same one line as the
  * Claude Code and dsh plugins): at session end, say how many calls ACP
  * governed, anything it said, and deep-link this session. Returns null when
  * there is nothing to say — zero governed calls must produce zero spam.
@@ -308,7 +308,7 @@ export default function acp(pi: ExtensionAPI): void {
       hook_event_name: event,
       agent_tier: tierOf(ctx),
     };
-    // gatewaystack-connect#1518: the attended claim and native_ask capability
+    // the attended claim and native_ask capability
     // ride PreToolUse only. The claim is read from the runtime signal itself
     // (NEVER from ACP_AGENT_TIER, which is an override and can say anything);
     // claim:false is a positive "nobody will see a dialog". native_ask is
@@ -327,7 +327,7 @@ export default function acp(pi: ExtensionAPI): void {
   // outage. Same posture as an outage (attended fails open, unattended stays
   // blocked), but the message names the cause and the fix. A 401 with
   // `code: "workspace_deleted"` says once per session how to remove ACP, then
-  // proceeds silently. (gatewaystack-connect#1693, from claude-code-acp-plugin 0.29.3.)
+  // proceeds silently. (From claude-code-acp-plugin 0.29.3.)
   function keyRejected(
     ctx: ExtensionContext,
     toolName: string,
@@ -360,7 +360,7 @@ export default function acp(pi: ExtensionAPI): void {
       try {
         data = await post<Decision>("/govern/tool-use", payload(), ctx.signal);
       } catch (first) {
-        // Retry once before applying the fail posture (gatewaystack-connect#690):
+        // Retry once before applying the fail posture:
         // a confirmed incident had the gateway answer HTTP 200 (an allow) just
         // after the client aborted at 4s, and the unattended tier turned that
         // into a deny. Cold starts are the cause, so the retry lands warm.
@@ -416,7 +416,7 @@ export default function acp(pi: ExtensionAPI): void {
         // The human's "no" (or no answer in time) is the gateway's answer too:
         // the held approval expires server-side (HARNESS_ASK_TTL) and the
         // model is told not to retry the same command (same steer as the
-        // Claude Code plugin). gatewaystack-connect#1902: never a hang.
+        // Claude Code plugin). Never a hang.
         const why = answer === "timed-out"
           ? `nobody answered the prompt within ${Math.round(askTimeoutMs() / 60_000)} min`
           : "the operator said no";
@@ -498,7 +498,7 @@ export default function acp(pi: ExtensionAPI): void {
         return undefined;
       }
       if (notice && (isPii || !shadowOff())) {
-        // PII notices always print; shadow-mode counterfactuals (#607) are
+        // PII notices always print; shadow-mode counterfactuals are
         // advisory, arrive with action "pass", and honour ACP_SHADOW=off.
         if (!isPii) bump(ctx, "notices");
         tell(ctx, notice, "info");
@@ -510,8 +510,8 @@ export default function acp(pi: ExtensionAPI): void {
   });
 }
 
-/** Lead-in the gateway puts on line 1 of a native-ask reason (gateway
- *  govern/harnessAsk.ts ACP_ASK_PREFIX). When present, the reason is already
+/** Lead-in the gateway puts on line 1 of a native-ask reason (the gateway's ask
+ *  prefix). When present, the reason is already
  *  the whole human-facing text — action, agent's description, command, rule —
  *  so the prompt shows it verbatim instead of repeating the command. */
 export const ACP_ASK_PREFIX = "ACP (Agentic Control Plane) asks: ";
@@ -551,12 +551,18 @@ export type AskAnswer = "approved" | "declined" | "timed-out";
  *  denies. A prompt that throws is a "declined". */
 async function promptApproval(ctx: ExtensionContext, reason: string, toolName: string, input: unknown): Promise<AskAnswer> {
   const { title, body } = askPrompt(reason, toolName, input);
+  const ms = askTimeoutMs();
+  // pi >= 0.84 dismisses the dialog itself (with a live countdown) on
+  // `timeout` / `signal`, so a denied-by-timeout prompt never lingers on
+  // screen inviting a "yes" that can no longer count. The race below stays
+  // as the backstop for hosts that ignore the options.
+  const abort = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<AskAnswer>((resolve) => {
-    timer = setTimeout(() => resolve("timed-out"), askTimeoutMs());
+    timer = setTimeout(() => { abort.abort(); resolve("timed-out"); }, ms);
   });
   try {
-    const confirmed = ctx.ui.confirm(title, body).then(
+    const confirmed = ctx.ui.confirm(title, body, { timeout: ms, signal: abort.signal }).then(
       (ok): AskAnswer => (ok ? "approved" : "declined"),
       (): AskAnswer => "declined",
     );

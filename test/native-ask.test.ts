@@ -1,4 +1,4 @@
-// gatewaystack-connect#1518 / #1902: the native ask is bounded and renders the
+// the native ask is bounded and renders the
 // gateway's own reason. A prompt nobody answers is a deny, never a hang; a
 // gateway-branded reason is shown verbatim (its first line is the title); the
 // decline reason tells the model not to retry.
@@ -41,7 +41,7 @@ function ctxWith(confirm: (title: string, body: string) => Promise<boolean>) {
 
 const CALL = { type: "tool_call", toolName: "bash", toolCallId: "c-ask", input: { command: "git push --force origin main" } };
 
-test("a prompt nobody answers is denied after the ask timeout, not left hanging (#1902)", async () => {
+test("a prompt nobody answers is denied after the ask timeout, not left hanging", async () => {
   process.env.ACP_ASK_TIMEOUT_MS = "50";
   const { handlers, server } = await stubGateway("needs review");
   try {
